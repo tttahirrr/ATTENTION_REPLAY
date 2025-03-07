@@ -5,19 +5,35 @@ from network import REPLAY
 
 
 class ReplayTrainer():
-
+    """
+    This class handles the training process for the REPLAY model.
+    It defines the model, loss function, training/evaluation steps, and helper functions.
+    """
     def __init__(self, lambda_t, lambda_s):
+        """
+        Initializes the trainer with hyperparameters.
 
+        :param lambda_t: Temporal decay factor.
+        :param lambda_s: Spatial decay factor.
+        """
         self.lambda_t = lambda_t
         self.lambda_s = lambda_s
 
     def __str__(self):
+        """ Returns a string representation of the trainer. """
         return 'Use REPLAY training.'
 
     def parameters(self):
+        """ Returns the model's parameters for optimization. """
         return self.model.parameters()
 
     def generate_tensor_of_distribution(self, time):
+        """
+        Generates a tensor representing a cyclic distribution of time indices.
+
+        :param time: Total time steps (e.g., 168 for weekly data, 24 for daily data).
+        :return: Tensor of time indices, cyclically shifted.
+        """
         list1 = []
         temp = [i for i in range(time)]
         for i in range(time):
@@ -30,6 +46,15 @@ class ReplayTrainer():
         return torch.tensor(list1)
 
     def prepare(self, loc_count, user_count, hidden_size, gru_factory, device):
+        """
+        Prepares the REPLAY model for training.
+
+        :param loc_count: Number of unique locations (POIs).
+        :param user_count: Number of users.
+        :param hidden_size: Hidden size of the model.
+        :param gru_factory: Factory for creating the RNN (RNN, GRU, or LSTM).
+        :param device: Device to run the model on (CPU/GPU).
+        """
         f_t = lambda delta_t, user_len: ((torch.cos(delta_t * 2 * np.pi / 86400) + 1) / 2) * torch.exp(
             -(delta_t / 86400 * self.lambda_t))  # hover cosine + exp decay
         f_s = lambda delta_s, user_len: torch.exp(-(delta_s * self.lambda_s))  # exp decay
@@ -43,14 +68,41 @@ class ReplayTrainer():
                             self.week_weight_index, self.day_weight_index).to(device)
 
     def evaluate(self, x, t, t_slot, s, y_t, y_t_slot, y_s, h, active_users):
+        """
+        Runs the model in evaluation mode and returns predictions.
 
+        :param x: Input locations (POIs).
+        :param t: Timestamps of check-ins.
+        :param t_slot: Time slot indices.
+        :param s: Spatial coordinates.
+        :param y_t: Next time-step timestamps.
+        :param y_t_slot: Next time-step time slot indices.
+        :param y_s: Next time-step spatial coordinates.
+        :param h: Hidden state of the RNN.
+        :param active_users: IDs of active users in the batch.
+        :return: Model predictions and updated hidden state.
+        """
         self.model.eval()
         out, h = self.model(x, t, t_slot, s, y_t, y_t_slot, y_s, h, active_users)
         out_t = out.transpose(0, 1)
         return out_t, h
 
     def loss(self, x, t, t_slot, s, y, y_t, y_t_slot, y_s, h, active_users):
+        """
+        Computes the loss for a batch of input sequences.
 
+        :param x: Input locations (POIs).
+        :param t: Timestamps of check-ins.
+        :param t_slot: Time slot indices.
+        :param s: Spatial coordinates.
+        :param y: Ground truth next locations.
+        :param y_t: Next time-step timestamps.
+        :param y_t_slot: Next time-step time slot indices.
+        :param y_s: Next time-step spatial coordinates.
+        :param h: Hidden state of the RNN.
+        :param active_users: IDs of active users in the batch.
+        :return: Computed loss value.
+        """
         self.model.train()
         out, h = self.model(x, t, t_slot, s, y_t, y_t_slot, y_s, h, active_users)
         out = out.view(-1, self.loc_count)

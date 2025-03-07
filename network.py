@@ -15,6 +15,7 @@ class Rnn(Enum):
 
     @staticmethod
     def from_string(name):
+        """ Converts a string to its corresponding RNN type. """
         if name == 'rnn':
             return Rnn.RNN
         if name == 'gru':
@@ -31,6 +32,7 @@ class RnnFactory():
         self.rnn_type = Rnn.from_string(rnn_type_str)
 
     def __str__(self):
+        """ Returns a string representation of the chosen RNN type. """
         if self.rnn_type == Rnn.RNN:
             return 'Use pytorch RNN implementation.'
         if self.rnn_type == Rnn.GRU:
@@ -39,9 +41,11 @@ class RnnFactory():
             return 'Use pytorch LSTM implementation.'
 
     def is_lstm(self):
+        """ Checks if the selected RNN type is LSTM. """
         return self.rnn_type in [Rnn.LSTM]
 
     def create(self, hidden_size):
+        """ Creates an instance of the chosen RNN type with the specified hidden size. """
         if self.rnn_type == Rnn.RNN:
             return nn.RNN(hidden_size, hidden_size)
         if self.rnn_type == Rnn.GRU:
@@ -51,12 +55,14 @@ class RnnFactory():
 
 
 class User_Week_Distribution(nn.Module):
+    """ Models a Gaussian distribution over weekly time slots to learn temporal patterns. """
     def __init__(self, stamp_num):
         super().__init__()
         self.stamp_num = stamp_num
         self.sigma = nn.Parameter(torch.ones(self.stamp_num).view(self.stamp_num, 1))
 
     def forward(self, x):
+        """ Computes the Gaussian distribution for a given time input. """
         self.sigma.data = torch.abs(self.sigma.data)
         learned_weight = 1 / torch.sqrt(2 * pi * (self.sigma ** 2)) * torch.exp(-(x ** 2) / (2 * (self.sigma ** 2)))
         sum = torch.sum(learned_weight, dim=1, keepdim=True)
@@ -76,7 +82,10 @@ class User_Week_Distribution(nn.Module):
 
 
 class REPLAY(nn.Module):
-
+    """
+    Core neural network model for location prediction.
+    Uses embeddings, an RNN, and a custom temporal/spatial weighting mechanism.
+    """
     def __init__(self, input_size, user_count, hidden_size, f_t, f_s, rnn_factory, week, day, week_weight_index,
                  day_weight_index):
         super().__init__()
@@ -104,6 +113,21 @@ class REPLAY(nn.Module):
         # self.day_distribution=User_Day_Distribution(24)
 
     def forward(self, x, t, t_slot, s, y_t, y_t_slot, y_s, h, active_user):
+        """
+        Forward pass of the REPLAY model.
+
+        :param x: Input locations (POIs).
+        :param t: Timestamps of check-ins.
+        :param t_slot: Time slot indices.
+        :param s: Spatial coordinates.
+        :param y_t: Next time-step timestamps.
+        :param y_t_slot: Next time-step time slot indices.
+        :param y_s: Next time-step spatial coordinates.
+        :param h: Hidden state of the RNN.
+        :param active_user: IDs of active users in the batch.
+        :return: Predicted locations and updated hidden state.
+        """
+
         seq_len, user_len = x.size()
         # #------------------all ----------------------------
 
@@ -202,6 +226,7 @@ class REPLAY(nn.Module):
 
 
 def create_h0_strategy(hidden_size, is_lstm):
+    """ Factory function to create the appropriate initialization strategy for hidden states. """
     if is_lstm:
         return LstmStrategy(hidden_size, FixNoiseStrategy(hidden_size), FixNoiseStrategy(hidden_size))
     else:
@@ -209,7 +234,7 @@ def create_h0_strategy(hidden_size, is_lstm):
 
 
 class H0Strategy():
-
+    """ Base class for different hidden state initialization strategies. """
     def __init__(self, hidden_size):
         self.hidden_size = hidden_size
 

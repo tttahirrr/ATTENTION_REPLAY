@@ -6,8 +6,18 @@ from network import RnnFactory
 
 
 class Setting:
+    """
+    This class handles the configuration and argument parsing for training and evaluation.
+    It supports different datasets (Gowalla & Foursquare) and manages GPU settings, hyperparameters,
+    and other model-related parameters.
+    """
+
 
     def parse(self):
+        """
+        Parses command-line arguments to configure training settings.
+        Detects if the dataset is Foursquare and applies the appropriate defaults.
+        """
         self.guess_foursquare = any(['4sq' in argv for argv in sys.argv])  # foursquare has different default args.
 
         parser = argparse.ArgumentParser()
@@ -48,6 +58,9 @@ class Setting:
         self.device = torch.device('cpu') if args.gpu == -1 else torch.device('cuda', args.gpu)
 
     def parse_arguments(self, parser):
+        """
+        Defines general command-line arguments related to training and evaluation.
+        """
         # training
         parser.add_argument('--gpu', default=-1, type=int, help='the gpu to use')
         parser.add_argument('--hidden-dim', default=10, type=int, help='hidden dimensions to use')
@@ -65,6 +78,9 @@ class Setting:
                             help='report every x user on evaluation (-1: ignore)')
 
     def parse_gowalla(self, parser):
+        """
+        Defines default parameters for the Gowalla dataset.
+        """
 
         parser.add_argument('--batch-size', default=200, type=int,
                             help='amount of users to process in one pass (batching)')
@@ -77,6 +93,9 @@ class Setting:
                             help='the dataset under ./data/<dataset.txt> to load')
 
     def parse_foursquare(self, parser):
+        """
+        Defines default parameters for the Foursquare dataset.
+        """
 
         parser.add_argument('--batch-size', default=512, type=int,
                             help='amount of users to process in one pass (batching)')
@@ -89,6 +108,9 @@ class Setting:
                             help='the dataset under ./data/<dataset.txt> to load')
 
     def __str__(self):
+        """
+        Returns a string representation of the settings, indicating which dataset defaults were used.
+        """
         return (
             'parse with foursquare default settings' if self.guess_foursquare else 'parse with gowalla default settings') + '\n' \
             + 'use device: {}'.format(self.device)
