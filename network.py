@@ -191,7 +191,10 @@ class REPLAY(nn.Module):
 
         # ------------------Combine with User Embedding and Future Time------------------
         user_emb = self.user_encoder(active_user)  # (user_len, hidden_size)
-        t_future = t_emb2[-1]  # future time embedding from last time step: (user_len, hidden_size//2)
+        t_future = t_emb2[-1]
+        if t_future.dim() == 3:
+            t_future = t_future.squeeze(-1)
+
         combined = torch.cat((h_current, attended, user_emb, t_future), dim=-1)  # Dimension: 3*hidden_size + hidden_size//2
         y_linear = self.fc(combined)
 
