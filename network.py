@@ -192,8 +192,16 @@ class REPLAY(nn.Module):
         # ------------------Combine with User Embedding and Future Time------------------
         user_emb = self.user_encoder(active_user)  # (user_len, hidden_size)
         t_future = t_emb2[-1]
-        if t_future.dim() == 3:
+
+        # If shape is [user_len, hidden//2, 1], squeeze to [user_len, hidden//2]
+        if t_future.dim() == 3 and t_future.shape[-1] == 1:
             t_future = t_future.squeeze(-1)
+        elif t_future.dim() == 3 and t_future.shape[1] == 1:
+            t_future = t_future.squeeze(1)
+
+        # If still wrong, flatten to 2D manually (as last resort)
+        if t_future.dim() != 2:
+            t_future = t_future.view(t_future.size(0), -1)
 
         combined = torch.cat((h_current, attended, user_emb, t_future), dim=-1)  # Dimension: 3*hidden_size + hidden_size//2
         y_linear = self.fc(combined)
