@@ -80,43 +80,77 @@ class User_Week_Distribution(nn.Module):
 #     # sigma=self.user_day_sigma.index_select(0,active_user.view(-1)).view(user_len,-1)
 #     return 1/torch.sqrt(2*pi*(self.sigma**2))*torch.exp((-x**2)/(2*(self.sigma**2)))
 
+class FlashbackAttention(nn.Module):
+    def __init__(self, hidden_size):
+        super(FlashbackAttention, self).__init__()
+        # Learnable projection to compute a joint representation
+        self.attn_proj = nn.Linear(hidden_size * 2, hidden_size)
+        # Vector for scoring (could be multi-head, but this is a single-head version)
+        self.attn_score = nn.Linear(hidden_size, 1, bias=False)
+
+    def forward(self, current_hidden, past_hidden):
+        """
+        current_hidden: Tensor of shape (batch, hidden_size) representing the current state.
+        past_hidden: Tensor of shape (batch, seq_len, hidden_size) representing historical hidden states.
+        Returns:
+           attended: Tensor of shape (batch, hidden_size) — a weighted combination of past_hidden.
+           attn_weights: Tensor of shape (batch, seq_len) with the attention scores.
+        """
+        batch_size, seq_len, hidden_size = past_hidden.size()
+
+        # Expand current_hidden to shape (batch, seq_len, hidden_size)
+        current_expanded = current_hidden.unsqueeze(1).expand(-1, seq_len, -1)
+
+        # Concatenate along hidden dimension: (batch, seq_len, 2*hidden_size)
+        concat = torch.cat((past_hidden, current_expanded), dim=-1)
+
+        # Compute a joint representation and then a scalar score for each time step
+        energy = torch.tanh(self.attn_proj(concat))  # (batch, seq_len, hidden_size)
+        scores = self.attn_score(energy).squeeze(-1)  # (batch, seq_len)
+
+        # Normalize scores to get weights
+        attn_weights = F.softmax(scores, dim=-1)  # (batch, seq_len)
+
+        # Compute weighted sum of past_hidden states
+        attended = torch.bmm(attn_weights.unsqueeze(1), past_hidden).squeeze(1)  # (batch, hidden_size)
+        return attended, attn_weights
+
 
 class REPLAY(nn.Module):
     """
     Core neural network model for location prediction.
-    Uses embeddings, an RNN, and a custom temporal/spatial weighting mechanism.
+    Uses embeddings, an RNN, and a custom temporal/spatial weighting mechanism with attention-enhanced flashback.
     """
-    def __init__(self, input_size, user_count, hidden_size, f_t, f_s, rnn_factory, week, day, week_weight_index,
-                 day_weight_index):
+    def __init__(self, input_size, user_count, hidden_size, f_t, f_s, rnn_factory, week, day, week_weight_index, day_weight_index):
         super().__init__()
         self.input_size = input_size
         self.user_count = user_count
         self.hidden_size = hidden_size
         self.f_t = f_t  # function for computing temporal weight
         self.f_s = f_s  # function for computing spatial weight
-        self.week_matrix = week  # 168 *168
-        # self.day_matrix=day # 24*24
+        self.week_matrix = week  # 168 x 168 matrix
         self.week_weight_index = week_weight_index
-        # self.day_weight_index=day_weight_index
 
         self.encoder = nn.Embedding(input_size, hidden_size)  # location embedding
         self.user_encoder = nn.Embedding(user_count, hidden_size)  # user embedding
         self.week_encoder = nn.Embedding(24 * 7, hidden_size // 2)
-        # self.week_encoder=nn.Embedding(24*7,hidden_size)
-        # self.day_encoder=nn.Embedding(24,hidden_size//2)
         self.rnn = rnn_factory.create(hidden_size)
-        # self.fc = nn.Linear(3*hidden_size, input_size) # create outputs in lenght of locations
-        # self.fcpt= nn.Linear(2*hidden_size, hidden_size)
-        self.fc = nn.Linear(3 * hidden_size - hidden_size // 2, input_size)  # create outputs in lenght of locations
+        # fcpt projects the concatenated POI and temporal embeddings to the RNN hidden size
         self.fcpt = nn.Linear(2 * hidden_size - hidden_size // 2, hidden_size)
+        # Update: the final fc layer now takes concatenated features of dimension:
+        # current hidden state (hidden_size) + attended context (hidden_size) + user embedding (hidden_size) + future time embedding (hidden_size//2)
+        # Total = 3 * hidden_size + hidden_size//2
+        self.fc = nn.Linear(3 * hidden_size + hidden_size // 2, input_size)
         self.week_distribution = User_Week_Distribution(168)
-        # self.day_distribution=User_Day_Distribution(24)
+
+        # New attention module for flashback
+        self.flashback_attn = FlashbackAttention(hidden_size)
 
     def forward(self, x, t, t_slot, s, y_t, y_t_slot, y_s, h, active_user):
         """
-        Forward pass of the REPLAY model.
+        Forward pass of the REPLAY model with attention-enhanced flashback.
 
-        :param x: Input locations (POIs).
+        :param x: Input locations (POIs) [seq_len x user_len].
         :param t: Timestamps of check-ins.
         :param t_slot: Time slot indices.
         :param s: Spatial coordinates.
@@ -127,102 +161,42 @@ class REPLAY(nn.Module):
         :param active_user: IDs of active users in the batch.
         :return: Predicted locations and updated hidden state.
         """
-
         seq_len, user_len = x.size()
-        # #------------------all ----------------------------
 
-        # # week_weight = torch.where(week_weight < 0.001, 0, week_weight).view(1,user_len,168,1)
-        # # assert not torch.isinf(week_weight).any()
-        # # assert not torch.isnan(week_weight).any()
-
-        # # day_weight=torch.where(day_weight < 0.01, 0, day_weight).view(1,user_len,24,1)
-        # # assert not torch.isinf(day_weight).any()
-        # # assert not torch.isnan(day_weight).any()
-        # t_day1=t_slot%24
-        # t_day2=y_t_slot%24
-
-        # new_week_weight1=week_weight.index_select(0,t_slot.view(-1)).view(seq_len,user_len,168,1)
-
-        # new_day_weight2=day_weight.index_select(0,t_day2.view(-1)).view(seq_len,user_len,24,1)
-
-        # w_t1=self.week_matrix.index_select(0,t_slot.view(-1)).view(seq_len,user_len,-1)
-        # d_t1=self.day_matrix.index_select(0,t_day1.view(-1)).view(seq_len,user_len,-1)
-
-        # d_t1=self.day_encoder(d_t1).permute(0,1,3,2)#seq*batch_size*5*24
-        # w_t1=torch.matmul(w_t1,new_week_weight1).squeeze()
-        # d_t1=torch.matmul(d_t1,new_day_weight1).squeeze()
-        # t_emb1 = torch.cat((w_t1,d_t1),dim=-1)
-        # # # print(t_emb1.type())
-        # w_t2=self.week_matrix.index_select(0,y_t_slot.view(-1)).view(seq_len,user_len,-1)
-        # d_t2=self.day_matrix.index_select(0,t_day2.view(-1)).view(seq_len,user_len,-1)
-        # w_t2=self.week_encoder(w_t2).permute(0,1,3,2)#seq*batch_size*5*168
-        # d_t2=self.day_encoder(d_t2).permute(0,1,3,2)#seq*batch_size*5*24
-        # w_t2=torch.matmul(w_t2,new_week_weight2).squeeze()
-        # d_t2=torch.matmul(d_t2,new_day_weight2).squeeze()
-        # t_emb2 = torch.cat((w_t2,d_t2),dim=-1)
-
-        # ------------------week only ----------------------------
-
+        # ------------------Week-based Temporal Embedding------------------
         week_weight = self.week_distribution(self.week_weight_index).view(168, 168)
-        # week_weight = torch.where(week_weight < 0.001, 0, week_weight).view(1,user_len,168,1)
-        # day_weight=self.day_distribution(self.day_weight_index).view(24,24)
-        # day_weight=torch.where(day_weight < 0.01, 0, day_weight).view(1,user_len,24,1)
-        # assert not torch.isinf(day_weight).any()
-        # assert not torch.isnan(day_weight).any()
-        # t_day1=t_slot%24
-        # t_day2=y_t_slot%24
-
         new_week_weight1 = week_weight.index_select(0, t_slot.view(-1)).view(seq_len, user_len, 168, 1)
         new_week_weight2 = week_weight.index_select(0, y_t_slot.view(-1)).view(seq_len, user_len, 168, 1)
 
-        # new_day_weight1=day_weight.index_select(0,t_day1.view(-1)).view(seq_len,user_len,24,1)
-        # new_day_weight2=day_weight.index_select(0,t_day2.view(-1)).view(seq_len,user_len,24,1)
-
         w_t1 = self.week_matrix.index_select(0, t_slot.view(-1)).view(seq_len, user_len, -1)
-        # d_t1=self.day_matrix.index_select(0,t_day1.view(-1)).view(seq_len,user_len,-1)
-        w_t1 = self.week_encoder(w_t1).permute(0, 1, 3, 2)  # seq*batch_size*5*168
-        # d_t1=self.day_encoder(d_t1).permute(0,1,3,2)#seq*batch_size*5*24
-        w_t1 = torch.matmul(w_t1, new_week_weight1).squeeze()
-        # d_t1=torch.matmul(d_t1,new_day_weight1).squeeze()
+        w_t1 = self.week_encoder(w_t1).permute(0, 1, 3, 2)  # shape: (seq_len, user_len, hidden//2, 168)
+        w_t1 = torch.matmul(w_t1, new_week_weight1).squeeze()  # shape: (seq_len, user_len, hidden//2)
         t_emb1 = w_t1
-        # # print(t_emb1.type())
+
         w_t2 = self.week_matrix.index_select(0, y_t_slot.view(-1)).view(seq_len, user_len, -1)
-        # d_t2=self.day_matrix.index_select(0,t_day2.view(-1)).view(seq_len,user_len,-1)
-        w_t2 = self.week_encoder(w_t2).permute(0, 1, 3, 2)  # seq*batch_size*5*168
-        # d_t2=self.day_encoder(d_t2).permute(0,1,3,2)#seq*batch_size*5*24
-        w_t2 = torch.matmul(w_t2, new_week_weight2).squeeze()
-        # d_t2=torch.matmul(d_t2,new_day_weight2).squeeze()
+        w_t2 = self.week_encoder(w_t2).permute(0, 1, 3, 2)  # shape: (seq_len, user_len, hidden//2, 168)
+        w_t2 = torch.matmul(w_t2, new_week_weight2).squeeze()  # shape: (seq_len, user_len, hidden//2)
         t_emb2 = w_t2
 
-        x_emb = self.encoder(x)
-        poi_time = self.fcpt(torch.cat((x_emb, t_emb1), dim=-1))
-        out, h = self.rnn(poi_time, h)
-        # comopute weights per user
-        out_w = torch.zeros(seq_len, user_len, self.hidden_size, device=x.device)
-        for i in range(seq_len):
-            sum_w = torch.zeros(user_len, 1, device=x.device)
-            for j in range(i + 1):
-                dist_t = t[i] - t[j]
-                dist_s = torch.norm(s[i] - s[j], dim=-1)
-                a_j = self.f_t(dist_t, user_len)
-                b_j = self.f_s(dist_s, user_len)
-                a_j = a_j.unsqueeze(1)
-                b_j = b_j.unsqueeze(1)
-                w_j = a_j * b_j + 1e-10  # small epsilon to avoid 0 division
-                sum_w += w_j
-                out_w[i] += w_j * out[j]
-            # normliaze according to weights
-            out_w[i] /= sum_w
+        # ------------------Embedding and RNN Computation------------------
+        x_emb = self.encoder(x)  # (seq_len, user_len, hidden_size)
+        # Combine POI embedding with temporal embedding (t_emb1)
+        poi_time = self.fcpt(torch.cat((x_emb, t_emb1), dim=-1))  # (seq_len, user_len, hidden_size)
+        out, h = self.rnn(poi_time, h)  # RNN output: (seq_len, user_len, hidden_size)
 
-        # add user embedding:
-        p_u = self.user_encoder(active_user)
-        p_u = p_u.view(user_len, self.hidden_size)
-        out_pu = torch.zeros(seq_len, user_len, 2 * self.hidden_size, device=x.device)
-        for i in range(seq_len):
-            out_pu[i] = torch.cat([out_w[i], p_u], dim=1)
-        out_pu = torch.cat((out_pu, t_emb2), dim=-1)
-        y_linear = self.fc(out_pu)
+        # ------------------Attention-based Flashback------------------
+        hidden_seq = out.transpose(0, 1)  # (user_len, seq_len, hidden_size)
+        h_current = hidden_seq[:, -1, :]  # current hidden state: (user_len, hidden_size)
+        attended, attn_weights = self.flashback_attn(h_current, hidden_seq)  # (user_len, hidden_size)
+
+        # ------------------Combine with User Embedding and Future Time------------------
+        user_emb = self.user_encoder(active_user)  # (user_len, hidden_size)
+        t_future = t_emb2[-1]  # future time embedding from last time step: (user_len, hidden_size//2)
+        combined = torch.cat((h_current, attended, user_emb, t_future), dim=-1)  # Dimension: 3*hidden_size + hidden_size//2
+        y_linear = self.fc(combined)
+
         return y_linear, h
+
 
 
 def create_h0_strategy(hidden_size, is_lstm):
