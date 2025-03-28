@@ -56,6 +56,7 @@ class RnnFactory():
 
 class User_Week_Distribution(nn.Module):
     """ Models a Gaussian distribution over weekly time slots to learn temporal patterns. """
+
     def __init__(self, stamp_num):
         super().__init__()
         self.stamp_num = stamp_num
@@ -121,7 +122,9 @@ class REPLAY(nn.Module):
     Core neural network model for location prediction.
     Uses embeddings, an RNN, and a custom temporal/spatial weighting mechanism with attention-enhanced flashback.
     """
-    def __init__(self, input_size, user_count, hidden_size, f_t, f_s, rnn_factory, week, day, week_weight_index, day_weight_index):
+
+    def __init__(self, input_size, user_count, hidden_size, f_t, f_s, rnn_factory, week, day, week_weight_index,
+                 day_weight_index):
         super().__init__()
         self.input_size = input_size
         self.user_count = user_count
@@ -149,6 +152,7 @@ class REPLAY(nn.Module):
     def forward(self, x, t, t_slot, s, y_t, y_t_slot, y_s, h, active_user):
         """
         Forward pass of the REPLAY model with attention-enhanced flashback.
+        Returns predictions for each time step in the input sequence.
 
         :param x: Input locations (POIs) [seq_len x user_len].
         :param t: Timestamps of check-ins.
@@ -159,7 +163,7 @@ class REPLAY(nn.Module):
         :param y_s: Next time-step spatial coordinates.
         :param h: Hidden state of the RNN.
         :param active_user: IDs of active users in the batch.
-        :return: Predicted locations and updated hidden state.
+        :return: predictions (shape: [seq_len, user_len, input_size]), updated hidden state.
         """
         seq_len, user_len = x.size()
 
@@ -182,27 +186,38 @@ class REPLAY(nn.Module):
         x_emb = self.encoder(x)  # (seq_len, user_len, hidden_size)
         # Combine POI embedding with temporal embedding (t_emb1)
         poi_time = self.fcpt(torch.cat((x_emb, t_emb1), dim=-1))  # (seq_len, user_len, hidden_size)
-        out, h = self.rnn(poi_time, h)  # RNN output: (seq_len, user_len, hidden_size)
+        out, h = self.rnn(poi_time, h)  # out: (seq_len, user_len, hidden_size)
 
-        # ------------------Attention-based Flashback------------------
-        hidden_seq = out.transpose(0, 1)  # (user_len, seq_len, hidden_size)
-        h_current = hidden_seq[:, -1, :]  # current hidden state: (user_len, hidden_size)
-        attended, attn_weights = self.flashback_attn(h_current, hidden_seq)  # (user_len, hidden_size)
+        # ------------------Prepare Fixed Future Time and User Embedding------------------
+        # We use the fixed query time from the last time step of t_emb2 for all predictions.
+        fixed_t_future = t_emb2[-1]  # ideally (user_len, hidden_size//2)
+        if fixed_t_future.dim() > 2:
+            fixed_t_future = fixed_t_future.contiguous().view(fixed_t_future.size(0), -1)
 
-        # ------------------Combine with User Embedding and Future Time------------------
+        # Ensure active_user is a 1D tensor of indices.
+        if active_user.dim() > 1:
+            active_user = active_user.squeeze()
         user_emb = self.user_encoder(active_user)  # (user_len, hidden_size)
-        t_future = t_emb2[-1]  # Ideally, this should be (user_len, hidden_size//2)
 
-        # Force t_future to be 2D: if it has more than 2 dimensions, reshape it.
-        if t_future.dim() > 2:
-            t_future = t_future.view(t_future.size(0), -1)
+        # ------------------Time-Distributed Prediction------------------
+        predictions = []
+        # For each time step i, compute prediction using flashback on past hidden states
+        for i in range(seq_len):
+            # current hidden state at time step i: (user_len, hidden_size)
+            h_current_i = out[i]
+            # Past hidden states up to time step i: (i+1, user_len, hidden_size) -> transpose to (user_len, i+1, hidden_size)
+            past_hidden_i = out[:i + 1].transpose(0, 1)
+            # Apply flashback attention: using current state and its past hidden states
+            attended_i, _ = self.flashback_attn(h_current_i, past_hidden_i)
+            # Combine current state, attended context, user embedding, and fixed future time embedding
+            combined_i = torch.cat((h_current_i, attended_i, user_emb, fixed_t_future), dim=-1)
+            # Predict next POI for time step i (for all users)
+            pred_i = self.fc(combined_i)  # (user_len, input_size)
+            predictions.append(pred_i.unsqueeze(0))  # add time dimension
+        # Stack predictions: (seq_len, user_len, input_size)
+        predictions = torch.cat(predictions, dim=0)
 
-        combined = torch.cat((h_current, attended, user_emb, t_future), dim=-1)
-
-        y_linear = self.fc(combined)
-
-        return y_linear, h
-
+        return predictions, h
 
 
 def create_h0_strategy(hidden_size, is_lstm):
@@ -215,6 +230,7 @@ def create_h0_strategy(hidden_size, is_lstm):
 
 class H0Strategy():
     """ Base class for different hidden state initialization strategies. """
+
     def __init__(self, hidden_size):
         self.hidden_size = hidden_size
 
