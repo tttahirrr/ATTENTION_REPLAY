@@ -18,6 +18,7 @@ class ReplayTrainer():
         """
         self.lambda_t = lambda_t
         self.lambda_s = lambda_s
+        self.max_grad_norm = 1.0  # Add gradient clipping threshold
 
     def __str__(self):
         """ Returns a string representation of the trainer. """
@@ -67,6 +68,12 @@ class ReplayTrainer():
         self.model = REPLAY(loc_count, user_count, hidden_size, f_t, f_s, gru_factory, self.week, self.day,
                             self.week_weight_index, self.day_weight_index).to(device)
 
+        # Add gradient clipping
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=5, verbose=True
+        )
+
     def evaluate(self, x, t, t_slot, s, y_t, y_t_slot, y_s, h, active_users):
         """
         Runs the model in evaluation mode and returns predictions.
@@ -108,4 +115,21 @@ class ReplayTrainer():
         out = out.view(-1, self.loc_count)
         y = y.view(-1)
         l = self.cross_entropy_loss(out, y)
+        
+        # Add L2 regularization for attention weights
+        l2_reg = 0.01 * sum(p.pow(2.0).sum() for p in self.model.parameters())
+        l = l + l2_reg
+        
         return l
+
+    def train_step(self, x, t, t_slot, s, y, y_t, y_t_slot, y_s, h, active_users):
+        """Performs a single training step with gradient clipping"""
+        self.optimizer.zero_grad()
+        loss = self.loss(x, t, t_slot, s, y, y_t, y_t_slot, y_s, h, active_users)
+        loss.backward()
+        
+        # Clip gradients
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+        
+        self.optimizer.step()
+        return loss.item()
